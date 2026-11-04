@@ -18,6 +18,10 @@ RET = TRAP  # first trap word = return magic
 
 SLOTS = json.load(open('slots.json'))
 VERBOSE = '-v' in sys.argv
+# device resolution reported to the game. experiment: 400x240 makes it build a 5:3
+# projection instead of 4:3, which is what native widescreen needs.
+DEVW = int(os.environ.get('DEVW', '640'))
+DEVH = int(os.environ.get('DEVH', '480'))
 
 uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
 uc.ctl_set_cpu_model(UC_CPU_ARM_1136)
@@ -226,7 +230,29 @@ HELP_IMPL = {
 }
 cur_app = [0]
 import re as _re
-HELPERS = _re.findall(r'"(\w+)"', open('../tools/zeebx-emu/src/brew/aee_helpers.rs').read())
+# helper table: the aee sdk order. zeebx-emu has the full name list, but it is not in this
+# repo, so fall back to the indices helpers.c pins, rest get generic stubs (they only need to
+# return 0, the trace still shows which slots the game calls).
+_HRS = '../tools/zeebx-emu/src/brew/aee_helpers.rs'
+if os.path.exists(_HRS):
+    HELPERS = _re.findall(r'"(\w+)"', open(_HRS).read())
+else:
+    NHELP = 117
+    HELPERS = [f'stub{i}' for i in range(NHELP)]
+    for _i, _n in {
+        0: 'memmove', 1: 'memset', 2: 'strcpy', 3: 'strcat', 4: 'strcmp', 5: 'strlen',
+        6: 'strchr', 7: 'strrchr', 8: 'sprintf', 9: 'wstrcpy', 10: 'wstrcat', 11: 'wstrcmp',
+        12: 'wstrlen', 13: 'wstrchr', 16: 'strtowstr', 17: 'wstrtostr', 20: 'utf8towstr',
+        21: 'wstrtoutf8', 26: 'malloc', 27: 'free', 29: 'realloc', 35: 'GetAEEVersion',
+        36: 'atoi', 39: 'dbgprintf', 42: 'GetRand', 43: 'GetTimeMS', 44: 'GetUpTimeMS',
+        45: 'GetSeconds', 46: 'julian', 47: 'free', 48: 'GetAppInstance', 49: 'strtoul',
+        50: 'strncpy', 51: 'strncmp', 52: 'stricmp', 53: 'strnicmp', 54: 'strstr',
+        55: 'memcmp', 56: 'memchr', 57: 'strexpand', 58: 'stristr', 61: 'strdup',
+        62: 'strbegins', 63: 'strends', 69: 'strlower', 70: 'strupper', 79: 'vsprintf',
+        80: 'vsnprintf', 81: 'snprintf', 83: 'strlcpy', 84: 'strlcat', 95: 'strtod',
+        97: 'sleep', 106: 'GetSeconds', 109: 'qsort',
+    }.items():
+        HELPERS[_i] = _n
 helptab = oalloc(4 * len(HELPERS))
 for i, n in enumerate(HELPERS):
     wr(helptab + 4 * i, mktrap('helper.' + n, HELP_IMPL.get(n)))
@@ -271,7 +297,7 @@ def sh_devinfo():
     # just the size bits, game logs the rest
     # 8 x uint16 head of AEEDeviceInfo, then dwRAM at +24
     uc.mem_write(p, b'\0' * 44)
-    uc.mem_write(p, struct.pack('<8H', 640, 480, 0, 0, 8, 0, 0, 16))
+    uc.mem_write(p, struct.pack('<8H', DEVW, DEVH, 0, 0, 8, 0, 0, 16))
     wr(p + 24, HEAPSZ)
     return 0
 SHELL_IMPL = {'CreateInstance': sh_create, 'SetTimer': sh_settimer, 'CancelTimer': sh_canceltimer,
@@ -396,7 +422,7 @@ def egl_init():
     if arg(2): wr(arg(2), 0)
     return 1
 def egl_query():
-    v = {0x3057: 640, 0x3056: 480}.get(arg(2), 0)
+    v = {0x3057: DEVW, 0x3056: DEVH}.get(arg(2), 0)
     if arg(3): wr(arg(3), v)
     return 1
 DUMP_EVERY = int(os.environ.get('DUMP_EVERY', 60))
@@ -547,6 +573,23 @@ import glsw
 from PIL import Image
 G = glsw.GL(lambda a, n: bytes(uc.mem_read(a, n)))
 G.lr = lambda: R(UC_ARM_REG_LR)
+# PROJLOG=1: dump the first projection matrices the game loads. the port's widescreen relies
+# on the game building a 4:3 projection (aspect m5/m0 ~ 1.333), this is how we check it.
+if os.environ.get('PROJLOG'):
+    _lmx = G.LoadMatrixx
+    _proj = [0]
+    def _lmx_probe(p):
+        if G.mode == 0x1701 and _proj[0] < 400:
+            _proj[0] += 1
+            v = struct.unpack('<16i', bytes(uc.mem_read(p, 64)))
+            f = lambda i: v[i] / 65536.0
+            asp = (f(5) / f(0)) if f(0) else 0.0
+            if _proj[0] <= 2:
+                print('  PROJFULL ' + ' '.join(f'{f(i):.5f}' for i in range(16)))
+            print(f'  PROJ#{_proj[0]} m0={f(0):.4f} m5={f(5):.4f} aspect={asp:.4f} '
+                  f'm10={f(10):.4f} m14={f(14):.4f} m15={f(15):.4f}')
+        _lmx(p)
+    G.LoadMatrixx = _lmx_probe
 NARGS = {'Translatex': 3, 'Scalex': 3, 'Orthox': 6, 'Frustumx': 6, 'Viewport': 4, 'VertexPointer': 4,
          'TexCoordPointer': 4, 'ColorPointer': 4, 'NormalPointer': 3, 'Color4x': 4, 'Color4ub': 4,
          'ClearColorx': 4, 'BlendFunc': 2, 'AlphaFuncx': 2, 'BindTexture': 2, 'TexEnvx': 3,
@@ -673,7 +716,7 @@ cur_app[0] = app
 disp = mkobj('DISPLAY', {}, tag='DISPLAY@start')
 st = malloc(24)
 wr(st + 4, APP_CLSID); wr(st + 8, disp)
-uc.mem_write(st + 12, struct.pack('<hhhh', 0, 0, 640, 480))
+uc.mem_write(st + 12, struct.pack('<hhhh', 0, 0, DEVW, DEVH))
 print(f'pfnHandleEvent {rd(app + 24):#x}')
 print('EVT_APP_START ->', call(he, app, 0, 0, st))
 

@@ -18,9 +18,15 @@
 // game data + saves live here
 #define GAME_DIR "sdmc:/re4z/"
 
-// zeebo screen, what the game thinks it renders to
-#define ZW 640
-#define ZH 480
+// the screen the game is told it renders to. the game builds its whole projection from this
+// (devinfo + eglQuerySurface), so handing it the 3ds top screen size makes it render natively
+// at 400x240 with the right 5:3 aspect, no stretching and no cropping. hold SELECT at boot for
+// the original 640x480 4:3 instead. set once before the game inits, never changed after.
+extern int game_w, game_h;
+#define ZW game_w
+#define ZH game_h
+#define ZW_43 640   // zeebo original, and the size the bottom target renders at
+#define ZH_43 480
 
 typedef uint16_t AECHAR;
 typedef void (*PFNNOTIFY)(void *);
