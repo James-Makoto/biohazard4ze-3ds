@@ -64,9 +64,7 @@ $(BUILD):
 	@mkdir -p $@
 
 meta/icon.png meta/banner.png:
-	@echo "no menu art yet: make meta ICON_ART=icon.png BANNER_ART=banner.png"
-	@echo "falling back to placeholder art..."
-	@python3 meta/gen_placeholder.py meta
+	@echo "no menu art yet: make meta ICON_ART=icon.png BANNER_ART=banner.png"; exit 1
 
 meta:
 	@$(CURDIR)/.venv/bin/python meta/make_meta.py "$(ICON_ART)" "$(BANNER_ART)" meta

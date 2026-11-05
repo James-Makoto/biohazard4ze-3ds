@@ -1,7 +1,6 @@
 // zeebo pad over IHID/IHIDDevice, fed from the 3ds buttons
 #include <string.h>
 #include <stdlib.h>
-#include <math.h>
 #include "aee.h"
 
 #define UID_JOYSTICK 0x0106c3fd
@@ -161,116 +160,6 @@ static int stick(int v, int range)
     return a < 0 ? 0 : a > 255 ? 255 : a;
 }
 
-// ------------------------------------------------------------------ dodge (ios style)
-// while aiming, flick the stick to the edge, back to centre, and to the edge again in the same
-// direction -> step that way. the game already has "Step forward/right/left/back" under
-// "with weapon ready", so this only feeds it the input it already understands.
-#define DODGE_EDGE_ON   0.80f   // |stick| to count as pushed to the edge
-#define DODGE_EDGE_OFF  0.35f   // |stick| to count as back at centre
-#define DODGE_FLICK_MS  260     // centre -> edge must be quicker than this
-#define DODGE_GAP_MS    380     // the whole double flick must fit in this
-#define DODGE_COOL_MS   700     // after a step, ignore the stick this long
-#define DODGE_HOLD_MS   180     // how long the step input is held
-#define DODGE_AIM_KEYS  (KEY_R | KEY_ZR)   // ZR on a new 3ds, R on an old one
-#define DODGE_STEP_BTN  B_2     // the "{2}" of "Step forward: {^}+{2}"
-#define DODGE_USE_DPAD  1       // also push B_UP.. ; the text says "{^}+{2}", so cover both
-                                // the d-pad buttons and the stick axis, one of them is what
-                                // the game reads for "Step forward/right/left/back"
-
-enum { DG_IDLE, DG_FLICK1, DG_WAIT2 };
-
-static struct {
-    int state;
-    float dx, dy;      // direction of the first flick
-    u32 t_edge;        // when the first edge was hit
-    u32 t_centre;      // when it came back to centre
-    u32 t_cool;        // cooldown deadline
-    u32 t_hold;        // injection start, 0 = not injecting
-    int dir;           // 0 up 1 down 2 left 3 right
-} dg = { DG_IDLE, 0, 0, 0, 0, 0, 0, 0 };
-
-// push a button event the game will read back through GetNextButtonEvent
-static void dg_push(u32 uid, bool down)
-{
-    int nt = (qt + 1) & 31;
-    if (nt == qh) return;              // queue full, drop it
-    q[qt] = (ev_t){ uid, down };
-    qt = nt;
-    sig_raise(sig_btn);
-}
-
-static const u32 dg_dpad[4] = { B_UP, B_DOWN, B_LEFT, B_RIGHT };
-static const float dg_vec[4][2] = { { 0, 1 }, { 0, -1 }, { -1, 0 }, { 1, 0 } };
-
-static void dg_step_start(int dir, u32 t)
-{
-    dg.dir = dir;
-    dg.t_hold = t;
-    dg.t_cool = t + DODGE_COOL_MS;
-    if (DODGE_USE_DPAD) dg_push(dg_dpad[dir], true);
-    if (DODGE_STEP_BTN) dg_push(DODGE_STEP_BTN, true);
-    dbg("dodge: step dir %d", dir);
-}
-
-static void dg_step_end(void)
-{
-    if (DODGE_USE_DPAD) dg_push(dg_dpad[dg.dir], false);
-    if (DODGE_STEP_BTN) dg_push(DODGE_STEP_BTN, false);
-    dg.t_hold = 0;
-}
-
-// one poll of the gesture. x/y are the left stick, -1..1, y up
-static void dg_feed(float x, float y, bool aim, u32 t)
-{
-    float m = sqrtf(x * x + y * y);
-
-    // release the step input once its hold is over, whatever the state machine is doing
-    if (dg.t_hold && t - dg.t_hold >= DODGE_HOLD_MS) dg_step_end();
-
-    if (!aim) { dg.state = DG_IDLE; return; }
-    if (dg.t_cool && t < dg.t_cool) { dg.state = DG_IDLE; return; }
-
-    switch (dg.state) {
-    case DG_IDLE:
-        if (m >= DODGE_EDGE_ON) {
-            dg.dx = x; dg.dy = y; dg.t_edge = t;
-            dg.state = DG_FLICK1;
-        }
-        break;
-
-    case DG_FLICK1:
-        if (t - dg.t_edge > DODGE_GAP_MS) { dg.state = DG_IDLE; break; }
-        if (m <= DODGE_EDGE_OFF) { dg.t_centre = t; dg.state = DG_WAIT2; }
-        break;
-
-    case DG_WAIT2: {
-        if (t - dg.t_centre > DODGE_FLICK_MS || t - dg.t_edge > DODGE_GAP_MS) {
-            dg.state = DG_IDLE;
-            break;
-        }
-        if (m < DODGE_EDGE_ON) break;
-        // same direction as the first flick?
-        float l1 = sqrtf(dg.dx * dg.dx + dg.dy * dg.dy), l2 = m;
-        float dot = l1 > 0.001f ? (x * dg.dx + y * dg.dy) / (l1 * l2) : 0;
-        if (dot < 0.70f) { dg.state = DG_IDLE; break; }
-        int dir = fabsf(x) >= fabsf(y) ? (x >= 0 ? 3 : 2) : (y >= 0 ? 0 : 1);
-        dg.state = DG_IDLE;
-        dg_step_start(dir, t);
-        break;
-    }
-    }
-}
-
-// while a step is being injected the stick is forced to that direction, so the game sees a
-// clean push and the player's own wobble can't fight it
-static bool dg_override(float *x, float *y)
-{
-    if (!dg.t_hold) return false;
-    *x = dg_vec[dg.dir][0] * 0.9f;
-    *y = dg_vec[dg.dir][1] * 0.9f;
-    return true;
-}
-
 void hid_poll(void)
 {
     hidScanInput();
@@ -294,23 +183,11 @@ void hid_poll(void)
     circlePosition cp, cs;
     hidCircleRead(&cp);
     hidCstickRead(&cs);
-    // the dodge gesture reads the raw stick, before any override or deadzone
-    float nx = cp.dx / 150.0f, ny = -cp.dy / 150.0f;
-    if (nx > 1) nx = 1; else if (nx < -1) nx = -1;
-    if (ny > 1) ny = 1; else if (ny < -1) ny = -1;
-    dg_feed(nx, ny, (now & DODGE_AIM_KEYS) != 0, aee_uptime());
-
     int na[4];
     na[0] = stick(cp.dx, 150);
     na[1] = stick(-cp.dy, 150);
     na[2] = stick(cs.dx, 150);
     na[3] = stick(-cs.dy, 150);
-
-    float ox = nx, oy = ny;
-    if (dg_override(&ox, &oy)) {
-        na[0] = 128 + (int)(ox * 127);
-        na[1] = 128 + (int)(oy * 127);
-    }
 
     // o3ds has no right stick, dragging on the touch screen stands in for it
     if (now & KEY_TOUCH) {

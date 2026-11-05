@@ -81,11 +81,8 @@ the sound effects, just no music.
 | Circle Pad | left stick |
 | C-Stick, or drag on the touch screen | right stick |
 
-**X** opens the Status screen on the bottom screen. The game renders natively at the top
-screen's 400x240 (5:3) — no stretching, no letterboxing, and the HUD lays itself out for that
-width because the port reports 400x240 to the game at boot. Hold **SELECT** while booting for
-the original 640x480 4:3 instead. Hold **L** while booting to skip the music (**R** turns off
-all audio).
+**X** opens the Status screen on the bottom screen. **Select + Start** switches between widescreen
+and 4:3. Hold **L** while booting to skip the music (**R** turns off all audio).
 **L + R + Select + Start** quits, same as closing from the HOME menu.
 
 There are also a few debug keys, all **L + R** plus a face button (those buttons don't reach the

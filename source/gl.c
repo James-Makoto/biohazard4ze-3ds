@@ -223,9 +223,7 @@ void gl_resume(void) { hw_fog = false; lut_pending = true; }
 const char *gl_probe_name(int p) { return probe_names[p]; }
 
 volatile bool gl_paused;  // set while apt has us suspended, the gpu isn't ours then
-bool gl_wide = true;   // true = tell the game 400x240 (native), false = 640x480 (4:3)
-int game_w = 400;      // what the game is told the screen is. set at boot, see main.c
-int game_h = 240;
+bool gl_wide = true;   // stretch to 400x240, select+start drops to 4:3
 u64 gl_busy_ticks;
 u32 gl_swaps;  // time the game spent in its callbacks, main loop adds to it
 
@@ -540,27 +538,13 @@ void gl_swap(void)
     route = !gl_bottom_on ? ROUTE_TOP : cls == FC_MENU ? ROUTE_BOT : cls == FC_TITLE ? ROUTE_BOTH : ROUTE_TOP;
 }
 
-// game viewport (ZW x ZH, y up) -> the bound target, rotated for the portrait framebuffer.
-// top: ZW x ZH is already 400x240, so it maps 1:1 (or 640x480 -> 320x240 letterbox in 4:3 mode).
-// bottom: the inventory target is 640x480, fit ZW x ZH into it keeping the aspect.
+// game viewport (640x480, y up) -> top screen box, rotated for the portrait framebuffer
 static void fix_update(void)
 {
     float W = tgt_w(), H = tgt_h();
-    float sx0, sy0, sw, sh, bw, bx;
-    if (cur_tgt) {
-        // bottom target, 640x480. scale to fit, centred (bars if the aspects differ)
-        float s = 640.0f / ZW < 480.0f / ZH ? 640.0f / ZW : 480.0f / ZH;
-        float ox = (640.0f - ZW * s) * 0.5f, oy = (480.0f - ZH * s) * 0.5f;
-        bw = 640; bx = 0;
-        sx0 = ox + g.vp[0] * s; sw = g.vp[2] * s;
-        sy0 = oy + g.vp[1] * s; sh = g.vp[3] * s;
-    } else {
-        // top screen, 400x240. native: 1:1. 4:3: 320 wide, centred
-        bw = gl_wide ? 400 : 320;
-        bx = gl_wide ? 0 : 40;
-        sx0 = bx + g.vp[0] * bw / ZW; sw = g.vp[2] * bw / ZW;
-        sy0 = g.vp[1] * H / ZH; sh = g.vp[3] * H / ZH;
-    }
+    float bw = cur_tgt ? 640 : gl_wide ? 400 : 320, bx = cur_tgt || gl_wide ? 0 : 40;
+    float sx0 = bx + g.vp[0] * bw / ZW, sw = g.vp[2] * bw / ZW;
+    float sy0 = g.vp[1] * H / ZH, sh = g.vp[3] * H / ZH;
     float ax = sw / W, bxo = (2 * sx0 + sw) / W - 1;
     float ay = sh / H, byo = (2 * sy0 + sh) / H - 1;
     // x'' = y', y'' = -x' (tilt), z' = -z/2 - w/2 so gl [-w,w] lands in pica [-w,0]
@@ -573,16 +557,8 @@ static void fix_update(void)
     // scissor: game viewport intersected with glScissor, in framebuffer pixels
     float x0 = sx0, y0 = sy0, x1 = sx0 + sw, y1 = sy0 + sh;
     if (g.caps & CAP_SCISSOR) {
-        float cx0, cy0, cx1, cy1;
-        if (cur_tgt) {
-            float s = 640.0f / ZW < 480.0f / ZH ? 640.0f / ZW : 480.0f / ZH;
-            float ox = (640.0f - ZW * s) * 0.5f, oy = (480.0f - ZH * s) * 0.5f;
-            cx0 = ox + g.sc[0] * s; cx1 = ox + (g.sc[0] + g.sc[2]) * s;
-            cy0 = oy + g.sc[1] * s; cy1 = oy + (g.sc[1] + g.sc[3]) * s;
-        } else {
-            cx0 = bx + g.sc[0] * bw / ZW; cx1 = bx + (g.sc[0] + g.sc[2]) * bw / ZW;
-            cy0 = g.sc[1] * H / ZH; cy1 = (g.sc[1] + g.sc[3]) * H / ZH;
-        }
+        float cx0 = bx + g.sc[0] * bw / ZW, cx1 = bx + (g.sc[0] + g.sc[2]) * bw / ZW;
+        float cy0 = g.sc[1] * H / ZH, cy1 = (g.sc[1] + g.sc[3]) * H / ZH;
         if (cx0 > x0) x0 = cx0;
         if (cx1 < x1) x1 = cx1;
         if (cy0 > y0) y0 = cy0;
@@ -1126,17 +1102,9 @@ static void clear_bound(u32 wm)
 {
     float W = tgt_w(), H = tgt_h();
     if (g.caps & CAP_SCISSOR) {
-        float x0, x1, y0, y1;
-        if (cur_tgt) {
-            float s = 640.0f / ZW < 480.0f / ZH ? 640.0f / ZW : 480.0f / ZH;
-            float ox = (640.0f - ZW * s) * 0.5f, oy = (480.0f - ZH * s) * 0.5f;
-            x0 = ox + g.sc[0] * s; x1 = ox + (g.sc[0] + g.sc[2]) * s;
-            y0 = oy + g.sc[1] * s; y1 = oy + (g.sc[1] + g.sc[3]) * s;
-        } else {
-            float bw = gl_wide ? 400 : 320, bx = gl_wide ? 0 : 40;
-            x0 = bx + g.sc[0] * bw / ZW; x1 = bx + (g.sc[0] + g.sc[2]) * bw / ZW;
-            y0 = g.sc[1] * H / ZH; y1 = (g.sc[1] + g.sc[3]) * H / ZH;
-        }
+        float bw = cur_tgt ? 640 : gl_wide ? 400 : 320, bx = cur_tgt || gl_wide ? 0 : 40;
+        float x0 = bx + g.sc[0] * bw / ZW, x1 = bx + (g.sc[0] + g.sc[2]) * bw / ZW;
+        float y0 = g.sc[1] * H / ZH, y1 = (g.sc[1] + g.sc[3]) * H / ZH;
         if (x1 < x0) x1 = x0;
         if (y1 < y0) y1 = y0;
         C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)y0, (u32)(W - x1), (u32)y1, (u32)(W - x0));
@@ -1308,9 +1276,6 @@ const GLubyte *gl_GetString(GLenum n)
 void gl_MatrixMode(GLenum m) { g.mode = m == GL_PROJECTION ? 1 : m == GL_TEXTURE ? 2 : 0; }
 void gl_LoadIdentity(void) { Mtx_Identity(cur()); touch_mtx(); }
 
-// a projection matrix handed straight to glLoadMatrixf/x. the game builds its own 2d screen
-// mapping and does the 3d transform on the cpu (zeebo has no hardware t&l), so there is
-// nothing to correct here any more: the aspect comes from the size we report at boot.
 void gl_LoadMatrixx(const GLfixed *m)
 {
     C3D_Mtx *d = cur();
@@ -1397,13 +1362,6 @@ void gl_Rotatex(GLfixed a, GLfixed x, GLfixed y, GLfixed z)
 void gl_Orthox(GLfixed l_, GLfixed r_, GLfixed b_, GLfixed t_, GLfixed n_, GLfixed f_)
 {
     float l = fx(l_), r = fx(r_), b = fx(b_), t = fx(t_), n = fx(n_), f = fx(f_);
-    // the ui is drawn in this space. it stays 4:3 and gets the 1.25x horizontal stretch of the
-    // 400x240 mapping. log the first few so the log says whether the hud really uses ortho
-    static int logged;
-    if (logged < 4 && t > b && r > l) {
-        logged++;
-        dbg("wide: ortho %.0f..%.0f x %.0f..%.0f aspect %.3f", l, r, b, t, (r - l) / (t - b));
-    }
     C3D_Mtx m;
     Mtx_Zeros(&m);
     mtx_set(&m, 0, 2 / (r - l), 0, 0, -(r + l) / (r - l));

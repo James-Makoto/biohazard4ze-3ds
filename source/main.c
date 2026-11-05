@@ -152,15 +152,9 @@ int main(void)
         boot_keys |= hidKeysHeld();
     }
     bool audio = !(boot_keys & KEY_R), music = audio && !(boot_keys & KEY_L);
-    // the size the game is told it renders to, decided once here because it builds its
-    // projection from it at init. native 400x240 by default, SELECT at boot for the zeebo 4:3
-    gl_wide = !(boot_keys & KEY_SELECT);
-    game_w = gl_wide ? 400 : ZW_43;
-    game_h = gl_wide ? 240 : ZH_43;
-    printf("audio %s, music %s, screen %dx%d\n", audio ? "on" : "off", music ? "on" : "off",
-           game_w, game_h);
-    dbg("boot: keys %08lx audio %d music %d screen %dx%d heap %luk linear %luk", boot_keys,
-        audio, music, game_w, game_h, mem_heap_free() >> 10, linearSpaceFree() >> 10);
+    printf("audio %s, music %s\n", audio ? "on" : "off", music ? "on" : "off");
+    dbg("boot: keys %08lx audio %d music %d heap %luk linear %luk", boot_keys, audio, music,
+        mem_heap_free() >> 10, linearSpaceFree() >> 10);
 
     WHERE("init files"); files_init();
     void *shell = shell_obj();
@@ -200,7 +194,7 @@ int main(void)
     aptHook(&apt_cookie, apt_cb, NULL);
     WHERE("game start");
     shell_event(EVT_APP_START, 0, (u32)&st);
-    printf("running. %dx%d native\n", game_w, game_h);
+    printf("running. select+start toggles wide/4:3\n");
     dbg("main: game started");
 
     while (aptMainLoop()) {
@@ -210,8 +204,7 @@ int main(void)
         u32 down = hidKeysDown(), held = hidKeysHeld();
         // l+r+select+start quits through the same teardown as the home menu
         if ((held & (KEY_L | KEY_R | KEY_SELECT | KEY_START)) == (KEY_L | KEY_R | KEY_SELECT | KEY_START)) break;
-        // the screen size is fixed at boot (the game builds its projection from it then),
-        // so there is no runtime widescreen toggle any more. SELECT+START is free again
+        if ((held & KEY_SELECT) && (down & KEY_START) && !(held & (KEY_L | KEY_R))) gl_wide = !gl_wide;
         // hw debugging: l+r+y logs the next frame's draws, l+r+x cycles a state override
         if ((held & (KEY_L | KEY_R)) == (KEY_L | KEY_R)) {
             if (down & KEY_Y) {
