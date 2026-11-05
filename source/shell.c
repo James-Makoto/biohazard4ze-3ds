@@ -38,12 +38,18 @@ static int zero(void) { return 0; }
 static void *app;
 static void *pmod_out_slot;
 
+volatile bool app_wants_exit;   // game asked to stop (EVT_APP_STOP); main.c exits the process
+
 void *shell_app(void) { return app ? app : (pmod_out_slot ? *(void **)pmod_out_slot : NULL); }
 void shell_set_app(void *a) { app = a; }
 void shell_creating(void **slot) { pmod_out_slot = slot; }
 
 void shell_event(uint16_t evt, uint16_t w, uint32_t dw)
 {
+    if (evt == EVT_APP_STOP) {
+        dbg("shell_event: EVT_APP_STOP -> request exit");
+        app_wants_exit = true;
+    }
     if (!app) return;
     int (*he)(void *, int, int, uint32_t) = ((aee_obj *)app)->vt[2];
     he(app, evt, w, dw);
@@ -252,8 +258,19 @@ static int sh_devinfo(void *s, u8 *p)
 
 static int sh_sendevent(void *s, int pri, uint32_t cls, uint16_t evt, uint16_t w, uint32_t dw)
 {
+    dbg("sendevent cls %08lx evt %d w %d dw %lu", cls, evt, w, dw);
     shell_event(evt, w, dw);
     return 1;
+}
+
+// the game calls shell vtable slot 6 when the user confirms EXIT (it was an unimplemented stub,
+// so the applet stopped rendering but the process never left - the EXIT soft-lock). map it to a
+// real exit: main.c's loop sees app_wants_exit and tears the app down.
+static int sh_closeapplet(void)
+{
+    dbg("shell: close applet (slot 6) -> request exit");
+    app_wants_exit = true;
+    return SUCCESS;
 }
 
 static void *vt_shell[52];
@@ -265,6 +282,7 @@ void *shell_obj(void)
 
     v = vt_shell; vt_fill(v, 52);
     v[0] = one; v[1] = zero; v[2] = sh_create; v[4] = sh_devinfo;
+    v[6] = sh_closeapplet;
     v[11] = sh_settimer; v[12] = sh_canceltimer; v[13] = sh_timerexp;
     v[21] = sh_sendevent; v[36] = sh_resume;
 

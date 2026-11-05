@@ -163,7 +163,13 @@ enum { FC_GAME, FC_MENU, FC_TITLE, FC_OTHER };
 static int route = ROUTE_TOP;   // where this frame's draws go, from the last frame's class
 static int cur_tgt;             // 0 top, 1 bottom
 static bool bot_drawn;
-static bool fs_menu, fs_title, fs_world;   // what this frame drew, for gl_swap's verdict
+static bool fs_menu, fs_title;             // 2d page signatures seen THIS frame (merchant/select, title)
+static bool world_seen;                    // this frame rendered PERSPECTIVE geometry => real 3d world
+static float ui_l = 0.0f, ui_r = 640.0f;  // game UI x range, read back from the ortho projection
+// top-screen X mapping, chosen PER DRAW and applied by fix_update()'s bw/bx. nothing here needs
+// a latched frame class, mvp edits, or black bars: every class of draw gets its own 5:3 layout.
+enum { FM_FULL, FM_HUD, FM_TEXT };
+static int fix_mode = FM_FULL;
 static int last_class = FC_OTHER;
 static bool inv_seen;           // an inventory frame was shown this session
 static u16 *bot_img;            // copy of the bottom image, survives the console toggle
@@ -223,7 +229,7 @@ void gl_resume(void) { hw_fog = false; lut_pending = true; }
 const char *gl_probe_name(int p) { return probe_names[p]; }
 
 volatile bool gl_paused;  // set while apt has us suspended, the gpu isn't ours then
-bool gl_wide = true;   // stretch to 400x240, select+start drops to 4:3
+bool gl_wide = true;   // native 5:3 (frustum widened to fill 400x240), select+start drops to 4:3
 u64 gl_busy_ticks;
 u32 gl_swaps;  // time the game spent in its callbacks, main loop adds to it
 
@@ -328,6 +334,8 @@ static void bind_target(int t)
 }
 
 // ------------------------------------------------------------------ frame
+static void px_quads(const s16 *xy, int n, const float *rgba, bool prime);
+
 // no SYNCDRAW: the game paces itself, all we need is the gpu queue drained.
 // returns false if the gpu didn't finish within timeout_ms (0 = wait forever)
 static bool try_begin(u32 timeout_ms)
@@ -349,13 +357,24 @@ static bool try_begin(u32 timeout_ms)
     cur_tgt = -1;
     bot_drawn = false;
     bind_target(route == ROUTE_BOT ? 1 : 0);
-    fs_menu = fs_title = fs_world = false;
+    fs_menu = fs_title = world_seen = false;
+    fix_mode = FM_FULL;
     WHERE(was);
     in_frame = true;
     frame_draws = 0;
     ring_cur ^= 1;
     ring_used = 0;
     g.state_dirty = g.mvp_dirty = g.tm_dirty = g.fix_dirty = true;
+    // Solid black underlay for every 5:3 top frame. 3d gameplay repaints all 400px and hides it;
+    // 2d pages and story cutscenes only draw a 4:3 area, so their sides stay solid black. This
+    // replaces patching bars on at frame end, which flickered/garbaged on the first cutscene frame.
+    if (gl_wide && !cur_tgt && !gl_paused) {
+        static const s16 full[] = { 0, 0, 400, 0, 0, 240, 400, 240 };
+        static const float black[4] = { 0, 0, 0, 1 };
+        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+        C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+        px_quads(full, 1, black, false);
+    }
     if (gl_dump) {
         gl_dump = false;
         dumping = true;
@@ -469,10 +488,14 @@ static void fog_prime(void)
     if (dumping) dbg("   fog prime");
 }
 
-// paint the 4:3 bars black before showing the frame
+// paint the 4:3 side bars at frame END, ONLY for pure 2d pages (menus, level select, merchant,
+// pause, title). every frame that has a 3d world is full 5:3: HUD, text and full-screen effects
+// are placed by fix_mode in fix_update(), so there is nothing to cover with bars. try_begin()'s
+// full-screen underlay is kept to initialise both framebuffers (no first-frame garbage).
 static void draw_bars(void)
 {
-    if (gl_wide || route == ROUTE_BOT) return;
+    if (route == ROUTE_BOT) return;
+    if (gl_wide && world_seen) return;
     bind_target(0);
     // [0,40] and [360,400], full height
     static const s16 bars[] = { 0, 0, 40, 0, 0, 240, 40, 240, 360, 0, 400, 0, 360, 240, 400, 240 };
@@ -498,7 +521,7 @@ void gl_swap(void)
     // and merchant share the panel art but come from the title, so they stay on the top
     static bool in_level;
     static int other_run;
-    int cls = fs_title ? FC_TITLE : fs_world ? FC_GAME : fs_menu && in_level ? FC_MENU : FC_OTHER;
+    int cls = fs_title ? FC_TITLE : world_seen ? FC_GAME : fs_menu && in_level ? FC_MENU : FC_OTHER;
     if (cls == FC_GAME) in_level = true;
     if (cls == FC_TITLE || (cls == FC_OTHER && ++other_run > 45)) in_level = false;
     if (cls != FC_OTHER) other_run = 0;
@@ -542,7 +565,12 @@ void gl_swap(void)
 static void fix_update(void)
 {
     float W = tgt_w(), H = tgt_h();
-    float bw = cur_tgt ? 640 : gl_wide ? 400 : 320, bx = cur_tgt || gl_wide ? 0 : 40;
+    float bw, bx;
+    if (cur_tgt)                    { bw = 640; bx = 0;   }  // bottom: 1.2, untouched
+    else if (!gl_wide)              { bw = 320; bx = 40;  }  // manual 4:3 mode
+    else if (fix_mode == FM_HUD)    { bw = 320; bx = 80;  }  // 4:3 HUD right-anchored on 5:3
+    else if (fix_mode == FM_TEXT)   { bw = 320; bx = 40;  }  // centred 4:3 text / 2d pages
+    else                            { bw = 400; bx = 0;   }  // 3d world / full-screen effects
     float sx0 = bx + g.vp[0] * bw / ZW, sw = g.vp[2] * bw / ZW;
     float sy0 = g.vp[1] * H / ZH, sh = g.vp[3] * H / ZH;
     float ax = sw / W, bxo = (2 * sx0 + sw) / W - 1;
@@ -793,6 +821,32 @@ static const u8 *copy_fixed_eye(const arr_t *a, int lo, int n, const C3D_Mtx *mv
     return (const u8 *)out;
 }
 
+// x extent of this draw in the game's UI space. a wide, centred block means story/cutscene text;
+// a small right-side block is the in-game HUD. returns 0 when the vertex format is unreadable.
+static float ui_span_x(int lo, int hi, float *centre)
+{
+    *centre = 0.0f;
+    const arr_t *a = &g.va;
+    if (!a->ptr || hi < lo || a->size < 2) return 0.0f;
+    if (a->type != GL_FIXED && a->type != GL_FLOAT && a->type != GL_SHORT) return 0.0f;
+    int st = a->stride ? a->stride : a->size * tsize(a->type);
+    if (st <= 0) return 0.0f;
+    float mnx = 1e30f, mxx = -1e30f;
+    int last = hi;
+    if (last - lo > 4096) last = lo + 4096;   // guard against a bogus index range on a final frame
+    for (int i = lo; i <= last; i++) {
+        const u8 *v = a->ptr + (size_t)i * st;
+        float x;
+        if (a->type == GL_FIXED) x = ((const s32 *)v)[0] * (1.0f / 65536.0f);
+        else if (a->type == GL_FLOAT) x = ((const float *)v)[0];
+        else x = ((const s16 *)v)[0];
+        if (x < mnx) mnx = x;
+        if (x > mxx) mxx = x;
+    }
+    *centre = (mnx + mxx) * 0.5f;
+    return mxx - mnx;
+}
+
 static GPU_FORMATS pfmt(GLenum t)
 {
     switch (t) {
@@ -978,6 +1032,9 @@ static void draw(GLenum mode, int first, int count, const void *idx, GLenum ityp
     }
 
     if (gl_probe) { g.state_dirty = true; hw_tex = (tex_t *)-1; }
+    // (world_seen - the real 3d-world discriminator - is set just below in the per-draw
+    //  mapping block, using the perspective-projection test. CAP_FOG is no longer used as a
+    //  proxy because the OP cutscene leaves fog on when it returns to the menu.)
     if (g.fix_dirty) fix_update();
     if (g.state_dirty) state_update();
     if ((g.caps & CAP_FOG) && g.fog_dirty) fog_update();
@@ -999,6 +1056,42 @@ static void draw(GLenum mode, int first, int count, const void *idx, GLenum ityp
         hw_white = tex_only;
     }
 
+    // PER-DRAW top-screen X mapping. all placement lives in fix_update()'s bw/bx, so there are
+    // no mvp edits (round 11 drift), no latched frame class (first-frame offset) and no black
+    // bars on 3d frames or full-screen effects.
+    //  FM_FULL -> 400px: perspective world, and any quad that should cover one whole screen
+    //            (OP black-out / white flash / cutscene black background), stretched to 5:3.
+    //  FM_HUD  -> 320px right-anchored: health/ammo keep 4:3 and land at the bottom-right.
+    //  FM_TEXT -> 320px centred: story text, reticle, 2d pages (letterbox, bars at frame end).
+    const C3D_Mtx *pj = &g.st[1][g.sp[1]];
+    // world_seen: this frame actually drew PERSPECTIVE geometry => it is a real 3d world
+    // frame and maps full 5:3. CAP_FOG is no longer the discriminator: the OP cutscene
+    // leaves fog enabled when it returns to the menu, so 2d ortho pages (merchant/select/
+    // title) were being misread as world frames and stretched to 5:3. detect perspective
+    // the same way wide_fix_proj() does, and set it BEFORE the gate so the very first world
+    // draw already maps full 5:3 (no one-frame glitch on 2d<->3d transitions).
+    if (pj->r[2].w <= -0.5f && pj->r[3].w >= -0.5f) world_seen = true;   // perspective projection
+    int fm = FM_FULL;
+    if (gl_wide && !cur_tgt) {
+        if (!world_seen) {
+            fm = FM_TEXT;
+        } else if (pj->r[3].w > 0.5f) {
+            float cx = 0.0f, uw = ui_r - ui_l;
+            float span = ui_span_x(lo, hi, &cx);
+            bool font = t && t->sig == SIG_FONT;
+            // text is NEVER re-anchored per draw. a line of text is many tiny glyph quads whose
+            // centres sweep across the screen, so any x-based HUD test tears it ("cut in two") -
+            // round 18's regression proved exactly this. every font draw shares one centred 4:3
+            // box, keeping story text, subtitles and the interaction prompt intact and centred
+            // with no seam. only the HUD's solid bar/quad draws (non-font) keep the right anchor,
+            // so the health gauge stays at the bottom-right.
+            if (!font && uw > 0.0f && span > 0.92f * uw) fm = FM_FULL;          // full-screen effect
+            else if (!font && uw > 0.0f && cx > ui_l + 0.55f * uw) fm = FM_HUD; // right-side HUD quad
+            else fm = FM_TEXT;                                                  // all text centred
+        }
+    }
+    if (fm != fix_mode) { fix_mode = fm; fix_update(); }
+
     if (g.mvp_dirty || eye != hw_eye) upload_mvp(eye, mv);
     if (g.tm_dirty) {
         C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_tmat, &g.st[2][g.sp[2]]);
@@ -1011,7 +1104,6 @@ static void draw(GLenum mode, int first, int count, const void *idx, GLenum ityp
     else C3D_DrawArrays(prim, 0, count);
     frame_draws++;
 
-    if (g.caps & CAP_FOG) fs_world = true;
     if (t && sig_menu(t->sig)) fs_menu = true;
     if (t && t->sig == SIG_TITLE) fs_title = true;
     // title: the art again on the bottom, at full strength. the menu text (font atlas) stays on
@@ -1102,6 +1194,8 @@ static void clear_bound(u32 wm)
 {
     float W = tgt_w(), H = tgt_h();
     if (g.caps & CAP_SCISSOR) {
+        // clear must cover the whole framebuffer in EVERY frame. 2d pages get their black side
+        // bars from draw_bars() at frame end; gating the clear on the frame class leaves garbage.
         float bw = cur_tgt ? 640 : gl_wide ? 400 : 320, bx = cur_tgt || gl_wide ? 0 : 40;
         float x0 = bx + g.sc[0] * bw / ZW, x1 = bx + (g.sc[0] + g.sc[2]) * bw / ZW;
         float y0 = g.sc[1] * H / ZH, y1 = (g.sc[1] + g.sc[3]) * H / ZH;
@@ -1276,10 +1370,37 @@ const GLubyte *gl_GetString(GLenum n)
 void gl_MatrixMode(GLenum m) { g.mode = m == GL_PROJECTION ? 1 : m == GL_TEXTURE ? 2 : 0; }
 void gl_LoadIdentity(void) { Mtx_Identity(cur()); touch_mtx(); }
 
+// native 5:3 on the TOP screen only. only the 3d world's PERSPECTIVE matrix is widened here
+// (divide x by k, same idea as wide_k for glFrustumx) so the scene fills 400x240 un-stretched.
+// ortho (2d/UI) matrices are left exactly as the game built them: their placement on the 5:3
+// screen is decided per draw by fix_update()'s bw/bx (FM_FULL / FM_HUD / FM_TEXT), which avoids
+// both the mvp-edit drift and the black bars of the earlier attempts.
+static void wide_fix_proj(C3D_Mtx *d)
+{
+    if (!gl_wide || cur_tgt || g.mode != 1) return;
+    float m0 = d->r[0].x, m5 = d->r[1].y;
+    if (!(m0 > 0.0f) || !(m5 > 0.0f)) return;
+    if (d->r[3].w > 0.5f) {
+        // read back the game's UI x range from the ortho matrix (no matrix is modified):
+        // m0 = 2/(r-l), w = -(r+l)/(r-l)  ->  l = -span*(1+w)/2, r = span*(1-w)/2
+        float span = 2.0f / m0;
+        ui_l = -span * (1.0f + d->r[0].w) * 0.5f;
+        ui_r =  span * (1.0f - d->r[0].w) * 0.5f;
+        return;
+    }
+    float ga = m5 / m0;
+    if (ga < 1.1f || ga > 1.9f) return;
+    float k = 400.0f / 240.0f / ga;
+    if (k < 1.0f || k > 2.0f) return;
+    if (d->r[2].w > -0.5f || d->r[3].w < -0.5f) return;   // not perspective
+    d->r[0].x = m0 / k;
+}
+
 void gl_LoadMatrixx(const GLfixed *m)
 {
     C3D_Mtx *d = cur();
     for (int r = 0; r < 4; r++) mtx_set(d, r, fx(m[r]), fx(m[4 + r]), fx(m[8 + r]), fx(m[12 + r]));
+    wide_fix_proj(d);
     touch_mtx();
 }
 
@@ -1287,6 +1408,7 @@ void gl_LoadMatrixf(const GLfloat *m)
 {
     C3D_Mtx *d = cur();
     for (int r = 0; r < 4; r++) mtx_set(d, r, m[r], m[4 + r], m[8 + r], m[12 + r]);
+    wide_fix_proj(d);
     touch_mtx();
 }
 
@@ -1362,6 +1484,12 @@ void gl_Rotatex(GLfixed a, GLfixed x, GLfixed y, GLfixed z)
 void gl_Orthox(GLfixed l_, GLfixed r_, GLfixed b_, GLfixed t_, GLfixed n_, GLfixed f_)
 {
     float l = fx(l_), r = fx(r_), b = fx(b_), t = fx(t_), n = fx(n_), f = fx(f_);
+    // remember the game's UI x range for the per-draw classification in draw(). the matrix itself
+    // stays exactly as 1.2 built it - fix_update() places it on the 5:3 screen instead.
+    if (gl_wide && !cur_tgt) {
+        float ga = (r - l) / (t - b);
+        if (ga > 1.1f && ga < 1.9f) ui_l = l, ui_r = r;   // full-screen 4:3 UI, not a local ortho
+    }
     C3D_Mtx m;
     Mtx_Zeros(&m);
     mtx_set(&m, 0, 2 / (r - l), 0, 0, -(r + l) / (r - l));
@@ -1371,9 +1499,25 @@ void gl_Orthox(GLfixed l_, GLfixed r_, GLfixed b_, GLfixed t_, GLfixed n_, GLfix
     mul_cur(&m);
 }
 
+// native 5:3 on the TOP screen only: the game builds a 4:3 frustum (it only ever asked EGL for
+// the width and assumes a 480 tall screen). widening l/r by target/game aspect keeps the vertical
+// fov and shows more to the sides, so the scene fills the 400x240 top with no stretching. the
+// bottom target (inventory, 640x480) and 4:3 mode are left alone (cur_tgt / gl_wide guards).
+static float wide_k(float l, float r, float b, float t)
+{
+    if (!gl_wide || cur_tgt) return 1.0f;
+    float ga = (r - l) / (t - b);
+    if (!(ga > 0.01f) || ga > 100.0f) return 1.0f;
+    float k = 400.0f / 240.0f / ga;
+    if (k < 1.0f || k > 2.0f || ga < 1.1f || ga > 1.9f) return 1.0f;
+    return k;
+}
+
 void gl_Frustumx(GLfixed l_, GLfixed r_, GLfixed b_, GLfixed t_, GLfixed n_, GLfixed f_)
 {
     float l = fx(l_), r = fx(r_), b = fx(b_), t = fx(t_), n = fx(n_), f = fx(f_);
+    float k = wide_k(l, r, b, t);
+    if (k != 1.0f) { l *= k; r *= k; }
     C3D_Mtx m;
     Mtx_Zeros(&m);
     mtx_set(&m, 0, 2 * n / (r - l), 0, (r + l) / (r - l), 0);

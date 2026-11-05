@@ -45,11 +45,24 @@ export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 ICON_ART ?= private/art/icon.webp
 BANNER_ART ?= private/art/banner.png
 
+# the original game's HOME menu art, pulled out of the released re4z.cia (exeFS "banner"
+# and "icon" files). use them verbatim: the placeholder PNGs are only a fallback.
+ifneq ($(wildcard meta/banner.bnr),)
+ifneq ($(wildcard meta/icon.icn),)
+USE_ORIG_ART := 1
+endif
+endif
+
 .PHONY: all elf clean cia meta lang
 
-all: elf meta/icon.png meta/banner.png
-	@bannertool makebanner -i meta/banner.png -a meta/silence.wav -o $(BUILD)/banner.bnr
-	@bannertool makesmdh -s "$(APP_TITLE)" -l "$(APP_DESCRIPTION)" -p "$(APP_AUTHOR)" -i $(ICON) -o $(BUILD)/icon.icn
+all: elf $(if $(USE_ORIG_ART),,meta/icon.png meta/banner.png)
+	@if [ -n "$(USE_ORIG_ART)" ]; then \
+		cp meta/banner.bnr $(BUILD)/banner.bnr; \
+		cp meta/icon.icn $(BUILD)/icon.icn; \
+	else \
+		bannertool makebanner -i meta/banner.png -a meta/silence.wav -o $(BUILD)/banner.bnr; \
+		bannertool makesmdh -s "$(APP_TITLE)" -l "$(APP_DESCRIPTION)" -p "$(APP_AUTHOR)" -i $(ICON) -o $(BUILD)/icon.icn; \
+	fi
 	@mkdir -p release
 	@makerom -f cia -o release/$(TARGET).cia -elf $(TARGET).elf -rsf meta/re4z.rsf -target t -exefslogo \
 		-icon $(BUILD)/icon.icn -banner $(BUILD)/banner.bnr
@@ -64,7 +77,9 @@ $(BUILD):
 	@mkdir -p $@
 
 meta/icon.png meta/banner.png:
-	@echo "no menu art yet: make meta ICON_ART=icon.png BANNER_ART=banner.png"; exit 1
+	@echo "no menu art yet: make meta ICON_ART=icon.png BANNER_ART=banner.png"
+	@echo "falling back to placeholder art..."
+	@python3 meta/gen_placeholder.py meta
 
 meta:
 	@$(CURDIR)/.venv/bin/python meta/make_meta.py "$(ICON_ART)" "$(BANNER_ART)" meta

@@ -225,6 +225,7 @@ int main(void)
 
         u64 t = svcGetSystemTick();
         int ran = shell_pump();
+        if (app_wants_exit) { dbg("main: game requested exit, leaving loop"); break; }
         if (ran) gl_busy_ticks += svcGetSystemTick() - t;
         media_update();
         if (midi_capture_poll()) printf("\x1b[15;0Hbgm capture written\x1b[K");

@@ -15,6 +15,11 @@
 #define EVT_APP_SUSPEND     2
 #define EVT_APP_RESUME      3
 
+// set by shell.c when the game asks to stop (EVT_APP_STOP); main.c's loop then exits the app.
+// the in-game EXIT/YES menu is the game's own brew logic and never reaches APT, so without this
+// the process just keeps running (soft-lock) after the game thinks it closed.
+extern volatile bool app_wants_exit;
+
 // game data + saves live here
 #define GAME_DIR "sdmc:/re4z/"
 

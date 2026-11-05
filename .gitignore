@@ -20,3 +20,6 @@ tools/*
 .venv/
 __pycache__/
 *.pyc
+
+# emulator work dir (frames, midi dumps, logs)
+re-work/

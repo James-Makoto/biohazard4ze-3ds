@@ -81,8 +81,14 @@ the sound effects, just no music.
 | Circle Pad | left stick |
 | C-Stick, or drag on the touch screen | right stick |
 
-**X** opens the Status screen on the bottom screen. **Select + Start** switches between widescreen
-and 4:3. Hold **L** while booting to skip the music (**R** turns off all audio).
+**X** opens the Status screen on the bottom screen, and its map tab stays on the bottom LCD even
+after you close it — so when you're back in gameplay the bottom screen keeps showing the last map
+instead of going blank. The game renders natively at the top screen's 400x240 (5:3) — no
+stretching, no letterboxing, and the HUD lays itself out for that width because the port reports
+400x240 to the game at boot. Pure-2D screens (level select, mission select, the title) are drawn in
+a centred 4:3 window so the game's stray edge sprites stay off-screen; the rest of the top screen
+is true 5:3. Hold **SELECT** while booting for the original 640x480 4:3 instead. Hold **L** while
+booting to skip the music (**R** turns off all audio).
 **L + R + Select + Start** quits, same as closing from the HOME menu.
 
 There are also a few debug keys, all **L + R** plus a face button (those buttons don't reach the
@@ -158,8 +164,17 @@ You need devkitARM with libctru and citro3d, plus `makerom` and `bannertool` in 
 cd tools && sh pull.sh
 ```
 
-The HOME menu icon and banner aren't in the repo because they come from the game's art, so make
-them once from your own pictures, then build:
+The original game's HOME menu art is reused verbatim. `meta/banner.bnr` and `meta/icon.icn` are the
+`banner` and `icon` files pulled out of the released CIA's ExeFS, so the HOME menu shows the real
+game banner and icon instead of a black block or placeholder. They ship in the repo, so the default
+build uses them automatically — no step needed:
+
+```bash
+make
+```
+
+If you'd rather use your own art, delete those two files and the build falls back to generating
+placeholder art from `meta/banner.png` / `meta/icon.png`:
 
 ```bash
 make meta ICON_ART=icon.png BANNER_ART=banner.png
